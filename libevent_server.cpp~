@@ -1,0 +1,287 @@
+/*
+ * libevent_server.cpp
+ *
+ *  Created on: 2016年4月8日
+ *      Author: chenms
+ */
+#include "libevent_server.h"
+
+
+LibeventServer::LibeventServer(int tcp_port,int udp_port,int num_of_threads,int overtime,int timespan)
+{
+    tcp_listen_base_=NULL;
+    tcp_conn_listenner_=NULL;
+    udp_listen_base_=NULL;
+    udp_conn_event_=NULL;
+    overtime_event_=NULL;
+    overtime_check_base_=NULL;
+    tcp_listen_port_=tcp_port;
+    udp_listen_port_=udp_port;
+    num_of_workers_=num_of_threads;
+    overtime_threshold_=overtime;
+    udp_listen_socket_=-1;
+    timespan_=timespan;
+}
+LibeventServer::~LibeventServer()
+{
+    if(tcp_listen_base_!=NULL)
+        event_base_free(tcp_listen_base_);
+    if(udp_listen_base_!=NULL)
+        event_base_free(udp_listen_base_);
+    if(overtime_check_base_!=NULL)
+        event_base_free(overtime_check_base_);
+    if(tcp_conn_listenner_!=NULL)
+        evconnlistener_free(tcp_conn_listenner_);
+    if(udp_conn_event_!=NULL)
+        event_free(overtime_event_);
+    if(overtime_event_!=NULL)
+        event_free(overtime_event_);
+    if(udp_listen_socket_!=-1)
+        close(udp_listen_socket_);
+}
+
+bool LibeventServer::RunService()
+{
+	do
+    {
+        if(!CreateThreadPool())
+            break;
+        if(!StartTcpListen())
+            break;
+        if(!StartUdpListen())
+            break;
+        return true;
+	}while(0);
+	return false;
+}
+
+void LibeventServer::WaitForListenThread()
+{
+        tcp_listen_thread_->join();
+        udp_listen_thread_->join();
+        // overtime_check_thread_->join();
+}
+
+
+void LibeventServer::AcceptTcpError(evconnlistener *listener, void *ptr)
+{
+	//TODO
+    LOG(ERROR)<<"TCP Listen Thread  Accept Error";
+}
+
+void LibeventServer::AcceptTcpConn(evconnlistener * listener, int sock, sockaddr * addr, int len, void *ptr)
+{
+  LOG(TRACE)<<"Accept Tcp Conn,Send it to thread pool";
+  LibeventServer * pls=static_cast<LibeventServer *>(ptr);
+  pls->pthread_pool_->enqueue(ThreadPoolHandleTcp,sock);
+}
+
+void LibeventServer::ThreadPoolHandleTcp(int sock){
+  LOG(TRACE)<<"thread pool got the tcp conn";
+  // std::shared_ptr<ThreadInfo> pti()
+  // ThreadInfo * pti=static_cast<ThreadInfo *>(pthread_info);
+    struct bufferevent * bev=bufferevent_socket_new(pthread_info->pthread_event_base_,sock,BEV_OPT_CLOSE_ON_FREE);
+    if(bev==NULL){
+      LOG(ERROR)<<"create bufferevent for new tcp conn failed";
+      return;
+    }
+    TcpConnItem *ptci=new TcpConnItem(sock);//将其地址存起来
+    //将链接信息加入threadinfo对应的缓存中
+    pthread_info->AddTcpConnItem(ptci);
+    bufferevent_setcb(bev, TcpConnReadCb, NULL/*ConnWriteCb*/, TcpConnEventCB,ptci/*arg*/);
+    bufferevent_enable(bev, EV_READ /*| EV_WRITE*/ );
+}
+
+void LibeventServer::TcpConnReadCb(bufferevent * bev,void *ctx){
+    //TODO
+  LOG(INFO)<<"Read a Tcp data";
+}
+
+void LibeventServer::TcpConnEventCB(bufferevent *bev,short int  events,void * ctx){
+    //TODO
+  LOG(TRACE)<<"tcp conn takes an error";
+    TcpConnItem * ptci=static_cast<TcpConnItem *>(ctx);
+    //ThreadInfo * pti=static_cast<ThreadInfo *>(pthread_info);
+    //when comes an error,delete the item in the cache
+    pthread_info->DeleteTcpConnItem(ptci);
+    bufferevent_free(bev);
+}
+
+void LibeventServer::AcceptUdpConn(evutil_socket_t fd, short what, void * arg){
+    LibeventServer * pls=static_cast<LibeventServer *>(arg);
+    socklen_t addr_len=sizeof(sockaddr_in);
+    struct sockaddr_in *paddr=new sockaddr_in();
+    memset(paddr,0,addr_len);
+    char buf[255]={0};
+    //TODO
+    if(recvfrom(fd,buf,255,0,(sockaddr *)paddr,&addr_len)==-1){
+        return;
+    }
+    pls->pthread_pool_->enqueue(ThreadPoolHandleUdp,paddr);//将客户的地址传给线程池
+}
+
+void LibeventServer::ThreadPoolHandleUdp(void * client_addr){
+    struct sockaddr_in * paddr=static_cast<struct sockaddr_in *>(client_addr);
+    // ThreadInfo * pti=static_cast<ThreadInfo *>(pthread_info);
+    int udp_conn_socket=socket(AF_INET,SOCK_DGRAM,0);
+    struct sockaddr_in sin;
+    memset(&sin, 0, sizeof(sin));
+    sin.sin_family = AF_INET;
+    sin.sin_addr.s_addr = htonl(0);
+    sin.sin_port = htons(0);
+    if(bind(udp_conn_socket,(const sockaddr*)&sin,sizeof(sin))==-1)
+    {
+        LOG(ERROR)<<"binding udp temp socket fails";
+        return;
+    }
+    UdpConnItem *puci=new UdpConnItem(udp_conn_socket);
+    struct event *pudp_read_event=event_new(pthread_info->pthread_event_base_,udp_conn_socket,EV_READ | EV_PERSIST,UdpConnReadCb,(void *)puci);
+    if(pudp_read_event==NULL)
+        return;
+    if(event_add(pudp_read_event, 0))
+        return;
+    puci->pudp_read_event_=pudp_read_event;
+    //将udp“链接”信息加入threadinfo缓存中
+    pthread_info->AddUdpConnItem(puci);
+    //TODO send respond to the client by using the client_addr
+
+    delete paddr;//delete client_addr
+}
+void LibeventServer::UdpConnReadCb(evutil_socket_t fd, short what, void * arg){
+//TODO
+}
+
+void LibeventServer::UdpConnEventCB(evutil_socket_t fd, short what, void * arg){
+//TODO
+}
+
+bool LibeventServer::CreateThreadPool(){
+    bool ret=true;
+    try {
+            for(int i=0;i<num_of_workers_;++i){
+              std::shared_ptr<ThreadInfo> pti(new ThreadInfo(overtime_threshold_));
+                if(!pti->InitEventHandler(timespan_))
+                {
+                    ret=false;
+                    break;
+                }
+                thread_info_vec_.push_back(pti);
+            }
+
+            if(ret==true){
+              pthread_pool_.reset(new ThreadPool(num_of_workers_,thread_info_vec_));
+            }
+        } catch (...) {
+        ret=false;
+    }
+
+    return ret;
+}
+
+bool LibeventServer::StartTcpListen()
+{
+	do{
+        struct sockaddr_in sin;
+        tcp_listen_base_ = event_base_new();
+        if (!tcp_listen_base_)
+            break;
+        memset(&sin, 0, sizeof(sin));
+        sin.sin_family = AF_INET;
+        sin.sin_addr.s_addr = htonl(0);
+        sin.sin_port = htons(tcp_listen_port_);
+
+        tcp_conn_listenner_ = evconnlistener_new_bind(tcp_listen_base_, AcceptTcpConn, this,
+                                                      LEV_OPT_CLOSE_ON_FREE|LEV_OPT_REUSEABLE, -1,
+                                                      (struct sockaddr*)&sin, sizeof(sin));
+        if (!tcp_conn_listenner_)
+            break;
+        evconnlistener_set_error_cb(tcp_conn_listenner_, AcceptTcpError);
+
+        try{
+            tcp_listen_thread_.reset(new std::thread([this]
+                                                     {
+                                                         event_base_dispatch(tcp_listen_base_);
+                                                     }
+                                         ));
+        }catch(...){
+            break;
+        }
+        return true;
+	}while(0);
+    LOG(ERROR)<<"Tcp Listen on the port "<<tcp_listen_port_<<" failed"<<std::endl;
+	return false;
+}
+
+bool LibeventServer::StartUdpListen(){
+    do{
+        udp_listen_socket_=socket(AF_INET,SOCK_DGRAM,0);
+        if(udp_listen_socket_==-1)
+        {
+            LOG(ERROR)<<"creating udp listen socket fails";
+            break;
+        }
+        struct sockaddr_in sin;
+        udp_listen_base_ = event_base_new();
+        if (!udp_listen_base_)
+            break;
+        memset(&sin, 0, sizeof(sin));
+        sin.sin_family = AF_INET;
+        sin.sin_addr.s_addr = htonl(0);
+        sin.sin_port = htons(udp_listen_port_);
+        if(bind(udp_listen_socket_,(const sockaddr *)&sin,sizeof(sin))==-1)
+        {
+            LOG(ERROR)<<"binding udp listen socket fails";
+            break;
+        }
+
+        udp_conn_event_=event_new(udp_listen_base_,udp_listen_socket_,EV_READ | EV_PERSIST,AcceptUdpConn,(void *)this);
+        if(udp_conn_event_==NULL)
+            break;
+        if(event_add(udp_conn_event_, 0))
+            break;
+
+        try{
+            udp_listen_thread_.reset(new std::thread([this]
+                                                     {
+                                                         event_base_dispatch(udp_listen_base_);
+                                                     }
+                                         ));
+        }catch(...){
+            break;
+        }
+        return true;
+    }while(0);
+    LOG(ERROR)<<"Udp Listen on the port "<<udp_listen_port_<<" failed"<<std::endl;
+    return false;
+}
+bool LibeventServer::StartOvertimeCheck(int timespan)
+{
+    do{
+        try{
+            overtime_check_base_=event_base_new();
+            if(!overtime_check_base_)
+                break;
+            //ADD OVERTIME
+            overtime_event_=event_new(overtime_check_base_,-1,EV_TIMEOUT|EV_PERSIST,TimingProcessing,&overtime_threshold_);
+            if(!overtime_event_)
+                break;
+            timeval tv={timespan,0};
+            if(event_add(overtime_event_,&tv)==-1)
+                break;
+            overtime_check_thread_.reset(new std::thread([this]
+                                                         {
+                                                             event_base_dispatch(overtime_check_base_);
+                                                         }
+                                             ));
+        }
+        catch(...){
+            break;
+        }
+        return true;
+    }while (0);
+    LOG(ERROR)<<"failed start the overtime check thread";
+    return false;
+}
+void LibeventServer::TimingProcessing(evutil_socket_t fd, short what, void * arg)
+{
+}
